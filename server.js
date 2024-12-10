@@ -2,19 +2,27 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const multer = require('multer');
+const XLSX = require('xlsx');
+
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
 
-// Путь к папке с данными
 const dataFolder = path.join(__dirname, 'data');
+const excelDataFolder = path.join(__dirname, 'ExcelData');
 
-// Убедимся, что папка для хранения данных существует, если нет — создаём
-if (!fs.existsSync(dataFolder)) {
-  fs.mkdirSync(dataFolder);
-}
+// Убедимся, что папки существуют
+const ensureFolderExistence = (folderPath) => {
+  if (!fs.existsSync(folderPath)) {
+    fs.mkdirSync(folderPath);
+  }
+};
+
+ensureFolderExistence(dataFolder);
+ensureFolderExistence(excelDataFolder);
 
 // Пути к файлам данных
 const filePaths = {
@@ -24,79 +32,123 @@ const filePaths = {
   pallets: path.join(dataFolder, 'pallets.json')
 };
 
-// Маршрут для очистки всех данных
-app.post('/clear-data', (req, res) => {
-  // Заменяем данные на пустые массивы
-  saveDataToFile(filePaths.polly, []);
-  saveDataToFile(filePaths.polikarpova, []);
-  saveDataToFile(filePaths.total, []);
-
-  res.json({ status: 'success', message: 'Все данные успешно очищены.' });
-});
-
-// Вспомогательная функция для чтения данных из файла, если файл не существует, возвращает пустой массив/объект
+// Вспомогательные функции для чтения и записи данных в файлы
 const readDataFromFile = (filePath, defaultValue = []) => {
   if (!fs.existsSync(filePath)) {
-    saveDataToFile(filePath, defaultValue);  // Создаём файл, если его нет
+    saveDataToFile(filePath, defaultValue);
     return defaultValue;
   }
-
-  const rawData = fs.readFileSync(filePath, 'utf8');
   try {
-    return JSON.parse(rawData);
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
   } catch (err) {
-    console.error(`Ошибка парсинга данных из файла: ${filePath}`, err);
     return defaultValue;
   }
 };
 
-// Вспомогательная функция для записи данных в файл
 const saveDataToFile = (filePath, data) => {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
 };
 
-// Маршрут для получения только данных из файла total
+// Сохранение и получение данных
+app.post('/save-data', (req, res) => {
+  try {
+    const data = req.body;
+    const filePath = path.join(dataFolder, 'inventory_total.json');
+    saveDataToFile(filePath, data);
+    res.status(200).json({ status: 'success', message: 'Данные успешно сохранены.' });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: 'Ошибка при сохранении данных.' });
+  }
+});
+
 app.get('/get-total', (req, res) => {
-  const totalData = readDataFromFile(filePaths.total);
-  res.json(totalData);  // Отправляем данные из файла inventory_total.json
+  const totalData = readDataFromFile(filePaths.total, []);
+  res.json({ status: 'success', data: totalData });
 });
 
-// Маршрут для получения данных о паллетах
-app.get('/get-pallets', (req, res) => {
-  const palletsData = readDataFromFile(filePaths.pallets, { occupiedPallets: 0 });
-  res.json(palletsData);
+// Очистка данных
+app.post('/clear-data', (req, res) => {
+  try {
+    Object.values(filePaths).forEach(filePath => saveDataToFile(filePath, []));
+    res.status(200).json({ status: 'success', message: 'Данные успешно очищены.' });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: 'Ошибка при очистке данных.' });
+  }
 });
 
-// Маршрут для обновления данных о паллетах
-app.post('/update-pallets', (req, res) => {
-  const { occupiedPallets } = req.body;
-  if (typeof occupiedPallets !== 'number') {
-    return res.status(400).json({ status: 'error', message: 'Некорректные данные.' });
+
+// Функция для создания Excel файла 
+const createExcelFile = (data, fileName) => {
+  const headers = [
+    "Наименование товара",
+    "Общее количество",
+    "Полные коробки",
+    "Оставшиеся единицы",
+    "Полные поддоны",
+    "Оставшиеся коробки",
+    "Поддоны для товара"
+  ];
+
+  // Форматируем данные для таблицы
+  const formattedData = data.map(item => [
+    item.itemName,
+    item.totalUnits,
+    item.fullBoxes,
+    item.remainingUnits,
+    item.fullPallets,
+    item.remainingBoxes,
+    item.palletsForItem
+  ]);
+
+  const sheetData = [headers, ...formattedData];
+  const ws = XLSX.utils.aoa_to_sheet(sheetData);
+
+  // Задаем стили для выравнивания содержимого по центру
+  const centerStyle = { alignment: { horizontal: 'center', vertical: 'center' } };
+
+  // Применяем стиль ко всем ячейкам (как заголовкам, так и данным)
+  const range = XLSX.utils.decode_range(ws['!ref']); // Получаем диапазон ячеек
+  for (let row = range.s.r; row <= range.e.r; row++) {
+    for (let col = range.s.c; col <= range.e.c; col++) {
+      const cellAddress = { r: row, c: col };
+      const cell = ws[XLSX.utils.encode_cell(cellAddress)];
+      if (cell) {
+        cell.s = centerStyle; // Применяем стиль
+      }
+    }
   }
 
-  const palletsData = { occupiedPallets };
-  saveDataToFile(filePaths.pallets, palletsData);
-  res.json({ status: 'success', message: 'Данные о паллетах успешно обновлены.' });
-});
+  // Задаем ширину столбцов (если нужно)
+  ws['!cols'] = [
+    { wpx: 650 }, // Ширина для "Наименование товара"
+    { wpx: 120 }, // Ширина для "Общее количество"
+    { wpx: 120 }, // Ширина для "Полные коробки"
+    { wpx: 120 }, // Ширина для "Оставшиеся единицы"
+    { wpx: 120 }, // Ширина для "Полные поддоны"
+    { wpx: 120 }, // Ширина для "Оставшиеся коробки"
+    { wpx: 120 }  // Ширина для "Поддоны для товара"
+  ];
 
-// Маршрут для получения данных с сервера
-app.get('/get-data', (req, res) => {
-  const pollyData = readDataFromFile(filePaths.polly);
-  const polikarpovaData = readDataFromFile(filePaths.polikarpova);
-  const totalData = readDataFromFile(filePaths.total);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Данные');
 
-  res.json({ pollyData, polikarpovaData, totalData });
-});
+  // Путь к файлу
+  const filePath = path.join(excelDataFolder, `${fileName}.xlsx`);
 
-// Маршрут для сохранения данных на сервер
-app.post('/save-data', (req, res) => {
-  const { polikarpovaData, pollyData, totalData } = req.body;
+  // Создаем Excel файл
+  XLSX.writeFile(wb, filePath);
+};
+// Эндпоинт для создания Excel файла
+app.post('/create-excel', (req, res) => {
+  const data = req.body; // Пример данных из запроса
+  const fileName = 'inventory_report'; // Имя файла
 
-  if (polikarpovaData) saveDataToFile(filePaths.polikarpova, polikarpovaData);
-  if (pollyData) saveDataToFile(filePaths.polly, pollyData);
-  if (totalData) saveDataToFile(filePaths.total, totalData);
-
-  res.json({ status: 'success', message: 'Данные успешно сохранены.' });
+  try {
+    createExcelFile(data, fileName);
+    res.status(200).json({ status: 'success', message: 'Excel файл успешно создан.' });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: 'Ошибка при создании Excel файла.' });
+  }
 });
 
 // Запуск сервера
